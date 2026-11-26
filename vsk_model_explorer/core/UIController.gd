@@ -11,6 +11,8 @@ extends Node
 # W, E and G toggle these. The controls card (bottom right) is the one place that lists them; there is
 # no tool panel, so the right side has one surface.
 signal wireframe_toggled(on: bool)
+const CLICK_SLOP := 4.0  # px: a press that moves less is a click, more is a drag
+var _press_at := Vector2.INF
 var wireframe_on := false
 var grid_hidden := false
 var exploded := false
@@ -757,6 +759,17 @@ func _set_grid_hidden(button_pressed):
 		Grid.visible = not button_pressed
 
 
+# A left press and release at the same place. A left-drag orbits the camera, so a press alone is no click.
+func _is_click(event: InputEvent) -> bool:
+	var mb := event as InputEventMouseButton
+	if mb == null or mb.button_index != MOUSE_BUTTON_LEFT:
+		return false
+	if mb.pressed:
+		_press_at = mb.position
+		return false
+	return mb.position.distance_to(_press_at) < CLICK_SLOP
+
+
 func _on_mesh_clicked(
 	_camera: Node,
 	event: InputEvent,
@@ -765,7 +778,7 @@ func _on_mesh_clicked(
 	_shape_idx: int,
 	mesh: MeshInstance3D
 ):
-	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+	if _is_click(event):
 		if meshViewer != null and not meshViewer.is_queued_for_deletion():
 			meshViewer.queue_free()
 

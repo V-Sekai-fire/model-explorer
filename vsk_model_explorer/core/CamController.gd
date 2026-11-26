@@ -55,9 +55,12 @@ func _on_reposition_camera(aabb: AABB):
 func _unhandled_input(event):
 	if not enable_cam_control:
 		return
-	# Mouse path (unchanged): right-drag orbits, middle-drag pans, scroll zooms.
+	# Mouse path: left-drag orbits, right-drag or middle-drag pans, scroll zooms. A touch also arrives
+	# as an emulated left-drag; the touch path below already orbits for it.
 	if event is InputEventMouseMotion:
-		if event.button_mask == MOUSE_BUTTON_MASK_RIGHT:
+		if event.device == InputEvent.DEVICE_ID_EMULATION:
+			return
+		if event.button_mask == MOUSE_BUTTON_MASK_LEFT:
 			# Rotate
 			self.rotate_y(deg_to_rad(-1 * event.get_relative().x * ROTATE_SPEED))
 			CamRotHelper.rotate_x(deg_to_rad(-1 * event.get_relative().y * ROTATE_SPEED))
@@ -66,7 +69,7 @@ func _unhandled_input(event):
 			var camera_rot = CamRotHelper.rotation
 			camera_rot.x = clamp(camera_rot.x, -90, 90)
 			CamRotHelper.rotation = camera_rot
-		elif event.button_mask == MOUSE_BUTTON_MASK_MIDDLE:
+		elif event.button_mask in [MOUSE_BUTTON_MASK_RIGHT, MOUSE_BUTTON_MASK_MIDDLE]:
 			# Pan, the same direction as the two-finger pan below
 			var rel: Vector2 = event.get_relative()
 			_translate(Vector3(-rel.x * PAN_SPEED, rel.y * PAN_SPEED, 0.0))
