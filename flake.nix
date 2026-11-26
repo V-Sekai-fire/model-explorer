@@ -5,19 +5,19 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     # The guest programs come from their repositories' flakes (RFD66606-2501).
     headfit = {
-      url = "github:V-Sekai-fire/interactor-headfit-guest/dev/flake-binaries";
+      url = "github:V-Sekai-fire/interactor-headfit-guest";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     skintokens = {
-      url = "github:V-Sekai-fire/interactor-skintokens-guest/dev/flake-binaries";
+      url = "github:V-Sekai-fire/interactor-skintokens-guest";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     motion = {
-      url = "github:V-Sekai-fire/interactor-motion-guest/dev/flake-binaries";
+      url = "github:V-Sekai-fire/interactor-motion-guest";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     persona = {
-      url = "github:V-Sekai-fire/interactor-taskweft-persona/dev/flake-binaries";
+      url = "github:V-Sekai-fire/interactor-taskweft-persona";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     # interactor-usd-guest has no flake yet: its release.
