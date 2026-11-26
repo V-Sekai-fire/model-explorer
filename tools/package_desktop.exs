@@ -44,6 +44,8 @@
 #            parts require their notices to ship with the binaries, and the NVIDIA Open Model
 #            License and the Meta Llama 3 licence require a NOTICE file. `package` stops if one
 #            is missing.
+#   BUILD_SHA, SOURCE_DATE_EPOCH  optional: the commit and the time the build label shows
+#            (default: git's HEAD and now)
 #   BINTR    optional: dir with macos/, windows/ and linux/, each holding that OS's native
 #            translations bintr-<HASH>.dylib, .dll or .so (tools/compile_bintr.sh); a package
 #            without them runs every guest in the interpreter
@@ -187,10 +189,12 @@ defmodule PackageDesktop do
     File.write(path, Enum.join(patched, "\n"))
   end
 
+  # BUILD_SHA and SOURCE_DATE_EPOCH, when set, give the label and the date: a build from a source
+  # tree that is not a git checkout (the flake) names its commit, and the same commit gives the same pck.
   defp write_build_label(repo, src) do
-    with {:ok, sha} <- run("git", ["-C", repo, "rev-parse", "--short", "HEAD"]) do
+    with {:ok, sha} <- build_sha(repo) do
       sha = String.trim(sha)
-      now = DateTime.utc_now()
+      now = build_time()
       date_str = Calendar.strftime(now, "%Y-%m-%d")
       unix_time = DateTime.to_unix(now)
 
@@ -201,6 +205,20 @@ defmodule PackageDesktop do
       const BUILD_DATE_STR = "#{date_str}"
       const BUILD_UNIX_TIME = #{unix_time}
       """)
+    end
+  end
+
+  defp build_sha(repo) do
+    case System.get_env("BUILD_SHA") do
+      sha when sha in [nil, ""] -> run("git", ["-C", repo, "rev-parse", "--short", "HEAD"])
+      sha -> {:ok, sha}
+    end
+  end
+
+  defp build_time do
+    case System.get_env("SOURCE_DATE_EPOCH") do
+      epoch when epoch in [nil, ""] -> DateTime.utc_now()
+      epoch -> DateTime.from_unix!(String.to_integer(epoch))
     end
   end
 
