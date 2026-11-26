@@ -329,16 +329,15 @@
         "sinew-align": "sinew-align"
       },
       "locked": {
-        "lastModified": 1795730430,
-        "narHash": "sha256-Gq2SM1LOU+WZa0PoFl1tY7gxOnAESM46udSmqQCDDVE=",
+        "lastModified": 1795735113,
+        "narHash": "sha256-Jgbs5m1YhXYy5OI1CbzA7Fu1u60Tsenb24cHsxQ5fmQ=",
         "owner": "V-Sekai-fire",
         "repo": "interactor-headfit-guest",
-        "rev": "383569ae1c45e7cce658d3275545055f2262a8c8",
+        "rev": "ad053c6c8e162bb50f87cc3d4ce228a16d791285",
         "type": "github"
       },
       "original": {
         "owner": "V-Sekai-fire",
-        "ref": "dev/flake-binaries",
         "repo": "interactor-headfit-guest",
         "type": "github"
       }
@@ -434,16 +433,15 @@
         "slang": "slang"
       },
       "locked": {
-        "lastModified": 1795731957,
+        "lastModified": 1795734182,
         "narHash": "sha256-ftjWuIcy1dDLdRtBC7a8OzBSQbLNhGqxoYEBN2Uiiws=",
         "owner": "V-Sekai-fire",
         "repo": "interactor-motion-guest",
-        "rev": "10738b90d5b8e5a546eda2690ca1e726e125103e",
+        "rev": "f8380050cbd2a0c79415105a1fb990782fe51db0",
         "type": "github"
       },
       "original": {
         "owner": "V-Sekai-fire",
-        "ref": "dev/flake-binaries",
         "repo": "interactor-motion-guest",
         "type": "github"
       }
@@ -479,16 +477,15 @@
         "riscv64-sysroot": "riscv64-sysroot_3"
       },
       "locked": {
-        "lastModified": 1795732543,
+        "lastModified": 1795734192,
         "narHash": "sha256-cKiceFMCdg2zAtHwn5KOdgDBUs396IBOlhAWW3cAYp8=",
         "owner": "V-Sekai-fire",
         "repo": "interactor-taskweft-persona",
-        "rev": "6116653fb16a24627bd6267ec218e73f920f6c48",
+        "rev": "c2e8975fc644e51c0f2763496bf75ed8408c144a",
         "type": "github"
       },
       "original": {
         "owner": "V-Sekai-fire",
-        "ref": "dev/flake-binaries",
         "repo": "interactor-taskweft-persona",
         "type": "github"
       }
@@ -645,16 +642,15 @@
         "slang": "slang_2"
       },
       "locked": {
-        "lastModified": 1795731371,
-        "narHash": "sha256-53MgTOYlvyAUnqEBuQtEIYJ6tTMknSbc6Eox0Nq2xy4=",
+        "lastModified": 1795734176,
+        "narHash": "sha256-wUPESc5czRxL8DqHp4CSdyCXjWnBcQJ6orqRj1X3Erg=",
         "owner": "V-Sekai-fire",
         "repo": "interactor-skintokens-guest",
-        "rev": "d048ab853b3fe8bf98e6756c8bb2ed29437b6acb",
+        "rev": "23f4a9d81ce59691870bfaa66f6f573f515fb3fd",
         "type": "github"
       },
       "original": {
         "owner": "V-Sekai-fire",
-        "ref": "dev/flake-binaries",
         "repo": "interactor-skintokens-guest",
         "type": "github"
       }
