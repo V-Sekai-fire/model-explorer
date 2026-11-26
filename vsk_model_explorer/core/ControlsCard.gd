@@ -45,10 +45,10 @@ var INK: Color
 var MUTE: Color
 var LIT: Color
 
-# kind: "mouse" (part = left / right / middle / wheel), "keys" (part = key names), "file".
+# kind: "mouse" (part = left / right / middle / wheel, with "-drag" for a drag), "keys" (part = key names), "file".
 const ROWS := [
-	["mouse", "right", "Right-drag", "Orbit"],
-	["mouse", "middle", "Middle-drag", "Pan"],
+	["mouse", "left-drag", "Left-drag", "Orbit"],
+	["mouse", "right-drag", "Right-drag", "Pan"],
 	["mouse", "wheel", "Scroll", "Zoom"],
 	["mouse", "left", "Click a mesh", "Mesh details"],
 	["keys", ["L"], "L", "Wireframe"],
@@ -270,6 +270,8 @@ func _draw() -> void:
 
 # A mouse 16x24 seen from above: two buttons and a wheel; the part used is filled.
 func _mouse(c: Vector2, part: String) -> void:
+	var drag := part.ends_with("-drag")
+	part = part.trim_suffix("-drag")
 	var r := Rect2(c - Vector2(8, 12), Vector2(16, 24))
 	var body := StyleBoxFlat.new()
 	body.bg_color = Color(1, 1, 1)
@@ -319,7 +321,7 @@ func _mouse(c: Vector2, part: String) -> void:
 		draw_line(Vector2(c.x + 15, top + 5), Vector2(c.x + 12, top + 2), LIT, 1.5)
 		draw_line(Vector2(c.x + 9, top + 7), Vector2(c.x + 12, top + 10), LIT, 1.5)
 		draw_line(Vector2(c.x + 15, top + 7), Vector2(c.x + 12, top + 10), LIT, 1.5)
-	elif part in ["right", "middle"]:
+	elif drag:
 		# Drag arrows beside the mouse.
 		draw_line(Vector2(c.x + 11, c.y + 6), Vector2(c.x + 19, c.y + 6), LIT, 1.5)
 		draw_line(Vector2(c.x + 16, c.y + 3), Vector2(c.x + 19, c.y + 6), LIT, 1.5)

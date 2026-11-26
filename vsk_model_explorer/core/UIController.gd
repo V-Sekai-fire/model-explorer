@@ -11,6 +11,8 @@ extends Node
 # W, E and G toggle these. The controls card (bottom right) is the one place that lists them; there is
 # no tool panel, so the right side has one surface.
 signal wireframe_toggled(on: bool)
+const CLICK_SLOP := 4.0  # px: a press that moves less is a click, more is a drag
+var _press_at := Vector2.INF
 var wireframe_on := false
 var grid_hidden := false
 var exploded := false
@@ -111,6 +113,7 @@ func _process(_delta):
 
 	if Input.is_action_just_pressed("toggle_xray"):
 		_set_xray(not xray_on)
+		_refresh_exploded()
 
 	if Input.is_action_just_pressed("toggle_grid"):
 		grid_hidden = not grid_hidden
@@ -506,15 +509,18 @@ func _on_root_gltf_is_loaded(success, gltf: Node):
 
 	# Create convex collision
 	for mesh in meshes:
-		mesh = mesh as MeshInstance3D
-		mesh.create_convex_collision()
+		_make_clickable(mesh as MeshInstance3D)
 
-		var staticBody: StaticBody3D = mesh.get_node("%s_col" % mesh.name)
-		if not staticBody:
-			continue
-		staticBody.input_event.connect(_on_mesh_clicked.bind(mesh))
-		staticBody.mouse_entered.connect(_on_mesh_mouse_entered.bind(mesh))
-		staticBody.mouse_exited.connect(_on_mesh_mouse_exited.bind(mesh))
+
+# A click on the mesh shows its details and the pointer over it draws its outline.
+func _make_clickable(mesh: MeshInstance3D) -> void:
+	mesh.create_convex_collision()
+	var body := mesh.get_node_or_null("%s_col" % mesh.name) as StaticBody3D
+	if body == null:
+		return
+	body.input_event.connect(_on_mesh_clicked.bind(mesh))
+	body.mouse_entered.connect(_on_mesh_mouse_entered.bind(mesh))
+	body.mouse_exited.connect(_on_mesh_mouse_exited.bind(mesh))
 
 
 func calc_data_size(byte_size: int) -> String:
@@ -610,6 +616,8 @@ func _on_texture_double_clicked(tree: Tree):
 
 
 func _on_animation_item_double_clicked(tree: Tree):
+	if exploded:
+		_set_exploded(false)  # the pieces are static copies: an animation shows on the whole model
 	var animItem: TreeItem = tree.get_selected()
 	var anim: String = animItem.get_text(0)
 	var animationPlayer: AnimationPlayer = animItem.get_metadata(1)[1]
@@ -642,6 +650,8 @@ func _on_animation_item_double_clicked(tree: Tree):
 
 
 func _on_motion_item_double_clicked(tree: Tree) -> void:
+	if exploded:
+		_set_exploded(false)  # the pieces are static copies: an animation shows on the whole model
 	var item: TreeItem = tree.get_selected()
 	var motion = owner.get("motion")
 	if item and motion:
@@ -703,16 +713,31 @@ func _show_texture_viewer(tex):
 
 
 # addons/model_explode: the model comes apart into its separate shells, moved so none intersect.
-func _set_exploded(on: bool) -> void:
+func _set_exploded(on: bool, animate := true) -> void:
 	exploded = on
+	if meshViewer != null and not meshViewer.is_queued_for_deletion():
+		meshViewer.queue_free()
+	var nodes = []
+	nodes.append_array(get_tree().get_nodes_in_group(GlobalSignal.FBX_GROUP))
+	nodes.append_array(get_tree().get_nodes_in_group(GlobalSignal.GLTF_GROUP))
 	if on:
-		var nodes = []
-		nodes.append_array(get_tree().get_nodes_in_group(GlobalSignal.FBX_GROUP))
-		nodes.append_array(get_tree().get_nodes_in_group(GlobalSignal.GLTF_GROUP))
-		exploder.explode(nodes, get_tree().current_scene)
+		exploder.explode(nodes, get_tree().current_scene, animate)
 		exploder.print_layout()
+		if exploder.root != null:
+			for piece in exploder.root.find_children("*", "MeshInstance3D", true, false):
+				_make_clickable(piece)
 	else:
 		exploder.implode()
+	# The model's own meshes are hidden while its pieces show: only what is seen takes a click.
+	for model in nodes:
+		for body in (model as Node).find_children("*", "StaticBody3D", true, false):
+			body.input_ray_pickable = not on
+
+
+# The pieces are static copies: after a change to the model below them, make them again in place.
+func _refresh_exploded() -> void:
+	if exploded:
+		_set_exploded(true, false)
 
 
 # Translucent copies of every StandardMaterial3D on the model's meshes (a shader material keeps its
@@ -757,6 +782,17 @@ func _set_grid_hidden(button_pressed):
 		Grid.visible = not button_pressed
 
 
+# A left press and release at the same place. A left-drag orbits the camera, so a press alone is no click.
+func _is_click(event: InputEvent) -> bool:
+	var mb := event as InputEventMouseButton
+	if mb == null or mb.button_index != MOUSE_BUTTON_LEFT:
+		return false
+	if mb.pressed:
+		_press_at = mb.position
+		return false
+	return mb.position.distance_to(_press_at) < CLICK_SLOP
+
+
 func _on_mesh_clicked(
 	_camera: Node,
 	event: InputEvent,
@@ -765,7 +801,7 @@ func _on_mesh_clicked(
 	_shape_idx: int,
 	mesh: MeshInstance3D
 ):
-	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+	if _is_click(event):
 		if meshViewer != null and not meshViewer.is_queued_for_deletion():
 			meshViewer.queue_free()
 
