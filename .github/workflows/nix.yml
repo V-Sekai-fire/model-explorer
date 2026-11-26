@@ -1,0 +1,489 @@
+# The desktop packages: the flake builds them (RFD66606-2501), ORAS
+# publishes them to ghcr.io/v-sekai-fire/model-explorer, and every later
+# job pulls them by digest. A GitHub release is a copy of those files.
+#
+# A push to main builds and publishes with ORAS. Run by hand with
+# `publish` on, it also verifies each package on its own OS and makes
+# one release a platform, <tag>-<platform>, with the stage pointer, as
+# release.yml does. release.yml stays until this file has done that once.
+name: nix
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "Stage pointer to move to this commit; everything but release is a GitHub pre-release"
+        type: choice
+        options: [dev, beta, rc, release]
+        default: dev
+      publish:
+        description: "Create the tags and the GitHub releases (off: ORAS only)"
+        type: boolean
+        default: true
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  STAGE: ${{ inputs.stage || 'dev' }}
+  GH_TOKEN: ${{ github.token }}
+  # secrets.* is not allowed in a step's `if`; this env carries the answer.
+  HAVE_APPLE_SECRETS: ${{ secrets.APPLE_DEVID_P12 != '' }}
+jobs:
+  breaker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    outputs:
+      closed: ${{ steps.breaker.outputs.closed }}
+    steps:
+      - id: breaker
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          failed=$(gh run list -R "$GITHUB_REPOSITORY" \
+            --workflow nix.yml \
+            --branch "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" \
+            --status completed --limit 20 --json conclusion \
+            --jq '[.[]|select(.conclusion=="success" or
+              .conclusion=="failure")][0:3]
+              |map(select(.conclusion=="failure"))|length')
+          if [ "$failed" -ge 3 ] &&
+             [ "$GITHUB_EVENT_NAME" != workflow_dispatch ]; then
+            echo closed=false >> "$GITHUB_OUTPUT"
+            echo "Circuit open: the last 3 builds failed." \
+              "Run nix by hand after a fix." >> "$GITHUB_STEP_SUMMARY"
+            gh run cancel "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY"
+          else
+            echo closed=true >> "$GITHUB_OUTPUT"
+          fi
+  build:
+    needs: breaker
+    if: needs.breaker.outputs.closed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      tag: ${{ steps.push.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - id: key
+        run: |
+          lock=${{ hashFiles('flake.lock') }}
+          echo "key=nix-$RUNNER_OS-$lock" >> "$GITHUB_OUTPUT"
+      - uses: nix-community/cache-nix-action@v6
+        with:
+          primary-key: ${{ steps.key.outputs.key }}-${{ github.sha }}
+          restore-prefixes-first-match: |
+            ${{ steps.key.outputs.key }}-
+            nix-${{ runner.os }}-
+          gc-max-store-size-linux: 8G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-
+          purge-created: 0
+          purge-primary-key: never
+      - run: nix flake check --no-build
+      - run: nix build .#viewer -L --out-link result
+      - if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: oras-project/setup-oras@v1
+      - id: push
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        run: |
+          set -eu
+          when=$(git show -s --format=%ct)
+          stamp=$(date -u -d @"$when" +%Y%m%d%H%M%S)
+          tag="v0.0.0-$stamp-${GITHUB_SHA:0:12}"
+          mkdir out
+          cp -L result/* out/
+          chmod u+w out/*
+          cd out
+          # The flake names the files with the same tag.
+          ls "skintokens-viewer-$tag-linux-x86_64.tar.gz"
+          sha256sum -c --quiet SHA256SUMS
+          echo "$GH_TOKEN" |
+            oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          digest=$(oras push "ghcr.io/v-sekai-fire/model-explorer:$tag" \
+            --artifact-type application/vnd.v-sekai.model-explorer.packages \
+            ./* --format go-template='{{.digest}}')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "oras pull ghcr.io/v-sekai-fire/model-explorer@$digest ($tag)" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+  # --- linux ---
+  verify-linux:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      packages: read
+    env:
+      APP: skintokens-viewer
+      TAG: ${{ needs.build.outputs.tag }}
+    steps:
+      - uses: oras-project/setup-oras@v1
+      - name: Pull the packages by digest
+        shell: bash
+        env:
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          set -eu
+          echo "$GH_TOKEN" |
+            oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          oras pull "ghcr.io/v-sekai-fire/model-explorer@$DIGEST" -o dist
+          cd dist
+          sha256sum -c --quiet SHA256SUMS
+      - name: The packaged server starts, answers SQLite, and stops with the app
+        shell: bash
+        run: |
+          set +e
+          mkdir -p "$RUNNER_TEMP/pkg with space" && cd "$RUNNER_TEMP/pkg with space"
+          tar -xzf "$GITHUB_WORKSPACE/dist/$APP-$TAG-linux-x86_64.tar.gz"; exe=./$APP
+          ls -la
+          fails=0
+          run() {
+            label=$1; want_rc=$2; want=$3; bin=$4; shift 4
+            if [ -n "$bin" ]; then export WEFT_FDB_BIN_DIR="$bin"; else unset WEFT_FDB_BIN_DIR; fi
+            export WEFT_FDB_STATE_DIR="$RUNNER_TEMP/fdb state"
+            rm -f "$WEFT_FDB_STATE_DIR/selftest-result.txt"
+            out=$(perl -e 'alarm 240; exec @ARGV' "$exe" --headless -- --fdb-selftest "$@" 2>&1); rc=$?
+            line=$(head -1 "$WEFT_FDB_STATE_DIR/selftest-result.txt" 2>/dev/null)
+            echo "== $label: rc=$rc  $line"
+            if [ "$rc" = "$want_rc" ] && echo "$line" | grep -Eq "$want"; then echo "   ok"; else echo "   WRONG, wanted rc=$want_rc and /$want/"; echo "$out" | tail -15; fails=$((fails+1)); fi
+          }
+          mkdir "$RUNNER_TEMP/empty"
+          run "control: no fdbserver" 1 'FAIL plant=false mode=roundtrip fdbserver and fdbcli not found' "$RUNNER_TEMP/empty"
+          run "round trip through the packaged server" 0 'PASS plant=false mode=roundtrip fdbserver [0-9]+ on port' ""
+          run "second start reads the row the first wrote" 0 'PASS plant=false mode=read' "" --fdb-selftest-read
+          run "planted wrong value" 1 'FAIL plant=true mode=roundtrip read back' "" --fdb-selftest-plant
+          rm -rf "$RUNNER_TEMP/fdb state"
+          run "control: a fresh state has no row" 1 'FAIL plant=false mode=read no row from an earlier run' "" --fdb-selftest-read
+          echo "== no server left running"
+          if pgrep -l fdbserver; then fails=$((fails+1)); else echo "   none"; fi
+          echo "failed cases: $fails"; exit $fails
+
+  publish-linux:
+    needs: [build, verify-linux]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish != false }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    env:
+      TAG: ${{ needs.build.outputs.tag }}
+    steps:
+      - uses: oras-project/setup-oras@v1
+      - name: Pull the packages by digest
+        shell: bash
+        env:
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          set -eu
+          echo "$GH_TOKEN" |
+            oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          oras pull "ghcr.io/v-sekai-fire/model-explorer@$DIGEST" -o dist
+          cd dist
+          sha256sum -c --quiet SHA256SUMS
+          # This platform's files only, as each release holds.
+          grep -- "-linux-" SHA256SUMS > sums && mv sums SHA256SUMS
+          find . -type f ! -name SHA256SUMS ! -name "*-linux-*" -delete
+          sha256sum -c --quiet SHA256SUMS
+      - name: Create the Linux release and move the stage pointer
+        run: |
+          set -eu
+          full="$TAG-linux"
+          ! gh release view "$full" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || { echo "release $full exists"; exit 1; }
+          flags=""
+          [ "$STAGE" = release ] || flags="--prerelease"
+          gh release create "$full" dist/* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" $flags \
+            --title "Model Explorer $full ($STAGE) -- Linux" --generate-notes \
+            --notes "Model Explorer for Linux (x86_64), built from one pck: drop in a model and the auto-rig (R) rigs it. Ships with the MCP server off and its slider hidden; reach it with \`-- --mcp-port=8789\` from the command line. Verify with SHA256SUMS."
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$STAGE-linux" -f sha="$GITHUB_SHA" -F force=true >/dev/null 2>&1 \
+            || gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$STAGE-linux" -f sha="$GITHUB_SHA" >/dev/null
+          echo "Stage pointer $STAGE-linux -> $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+  # --- macos ---
+  # The package in ORAS is not signed: signing needs the secrets, which a flake build does not
+  # have. This job signs it and pushes the signed package as <tag>-macos-signed; the verify and
+  # the release take that digest.
+  sign-macos:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    env:
+      TAG: ${{ needs.build.outputs.tag }}
+    steps:
+      - uses: oras-project/setup-oras@v1
+      - name: Pull the packages by digest
+        shell: bash
+        env:
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          set -eu
+          echo "$GH_TOKEN" |
+            oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          oras pull "ghcr.io/v-sekai-fire/model-explorer@$DIGEST" -o dist
+          cd dist
+          sha256sum -c --quiet SHA256SUMS
+          # This platform's files only, as each release holds.
+          grep -- "-macos-" SHA256SUMS > sums && mv sums SHA256SUMS
+          find . -type f ! -name SHA256SUMS ! -name "*-macos-*" -delete
+          sha256sum -c --quiet SHA256SUMS
+      - name: Sign and notarize the macOS packages (rcodesign)
+        if: env.HAVE_APPLE_SECRETS == 'true'
+        env:
+          APPLE_DEVID_P12: ${{ secrets.APPLE_DEVID_P12 }}
+          APPLE_DEVID_P12_PASSWORD: ${{ secrets.APPLE_DEVID_P12_PASSWORD }}
+          APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          CODE_SIGN_VERSION: "0.29.0"
+          CODE_SIGN_SHA256: "dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002"
+        run: |
+          set -eu
+          umask 077
+          S="$RUNNER_TEMP/sign"; mkdir -p "$S/bin"
+          a="apple-codesign-$CODE_SIGN_VERSION-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL -o "$S/$a" "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F$CODE_SIGN_VERSION/$a"
+          echo "$CODE_SIGN_SHA256  $S/$a" | sha256sum -c
+          tar -xzf "$S/$a" -C "$S/bin" --strip-components=1
+          RC="$S/bin/rcodesign"; "$RC" --version
+          printf '%s' "$APPLE_DEVID_P12" | base64 -d > "$S/devid.p12"
+          printf '%s' "$APPLE_DEVID_P12_PASSWORD" > "$S/p12.pw"
+          printf '%s\n' "$APPLE_NOTARY_KEY_P8" > "$S/AuthKey.p8"
+          "$RC" encode-app-store-connect-api-key -o "$S/notary.json" "$APPLE_NOTARY_ISSUER_ID" "$APPLE_NOTARY_KEY_ID" "$S/AuthKey.p8"
+          cat > "$S/entitlements.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>com.apple.security.cs.allow-jit</key><true/>
+            <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+            <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
+            <key>com.apple.security.cs.disable-library-validation</key><true/>
+          </dict></plist>
+          PLIST
+          sign() { "$RC" sign --p12-file "$S/devid.p12" --p12-password-file "$S/p12.pw" --for-notarization --code-signature-flags runtime "$@"; }
+          tag="$TAG"
+          for app in skintokens-viewer; do
+            zip="dist/$app-$tag-macos-arm64.zip"
+            rm -rf "$S/pkg"; mkdir -p "$S/pkg"
+            unzip -q "$zip" -d "$S/pkg"
+            bundle="$S/pkg/$app.app"
+            mac="$bundle/Contents/MacOS"
+            sign "$mac/libfdb_c.dylib"
+            sign "$mac/fdbserver"
+            sign "$mac/fdbcli"
+            sign --entitlements-xml-path "$S/entitlements.plist" "$bundle"
+            "$RC" verify "$mac/$app"
+            rm -f "$zip"
+            (cd "$S/pkg" && zip -qry -n .gguf "$GITHUB_WORKSPACE/$zip" .)
+          done
+          rm -rf "$S/devid.p12" "$S/p12.pw" "$S/AuthKey.p8" "$S/notary.json"
+          (cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+          echo "macOS packages signed as Developer ID and notarized" >> "$GITHUB_STEP_SUMMARY"
+      - id: push
+        run: |
+          set -eu
+          cd dist
+          digest=$(oras push "ghcr.io/v-sekai-fire/model-explorer:$TAG-macos-signed" \
+            --artifact-type application/vnd.v-sekai.model-explorer.packages \
+            ./* --format go-template='{{.digest}}')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+  verify-macos:
+    needs: [build, sign-macos]
+    runs-on: macos-latest
+    timeout-minutes: 20
+    permissions:
+      packages: read
+    env:
+      APP: skintokens-viewer
+      TAG: ${{ needs.build.outputs.tag }}
+    steps:
+      - uses: oras-project/setup-oras@v1
+      - name: Pull the packages by digest
+        shell: bash
+        env:
+          DIGEST: ${{ needs.sign-macos.outputs.digest }}
+        run: |
+          set -eu
+          echo "$GH_TOKEN" |
+            oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          oras pull "ghcr.io/v-sekai-fire/model-explorer@$DIGEST" -o dist
+          cd dist
+          sha256sum -c --quiet SHA256SUMS
+      - name: The packaged server starts, answers SQLite, and stops with the app
+        shell: bash
+        run: |
+          set +e
+          mkdir -p "$RUNNER_TEMP/pkg with space" && cd "$RUNNER_TEMP/pkg with space"
+          unzip -q "$GITHUB_WORKSPACE/dist/$APP-$TAG-macos-arm64.zip"
+          exe="./$APP.app/Contents/MacOS/$APP"
+          chmod +x "$exe" "./$APP.app/Contents/MacOS/fdbserver" "./$APP.app/Contents/MacOS/fdbcli"
+          ls -la
+          fails=0
+          run() {
+            label=$1; want_rc=$2; want=$3; bin=$4; shift 4
+            if [ -n "$bin" ]; then export WEFT_FDB_BIN_DIR="$bin"; else unset WEFT_FDB_BIN_DIR; fi
+            export WEFT_FDB_STATE_DIR="$RUNNER_TEMP/fdb state"
+            rm -f "$WEFT_FDB_STATE_DIR/selftest-result.txt"
+            out=$(perl -e 'alarm 240; exec @ARGV' "$exe" --headless -- --fdb-selftest "$@" 2>&1); rc=$?
+            line=$(head -1 "$WEFT_FDB_STATE_DIR/selftest-result.txt" 2>/dev/null)
+            echo "== $label: rc=$rc  $line"
+            if [ "$rc" = "$want_rc" ] && echo "$line" | grep -Eq "$want"; then echo "   ok"; else echo "   WRONG, wanted rc=$want_rc and /$want/"; echo "$out" | tail -15; fails=$((fails+1)); fi
+          }
+          mkdir "$RUNNER_TEMP/empty"
+          run "control: no fdbserver" 1 'FAIL plant=false mode=roundtrip fdbserver and fdbcli not found' "$RUNNER_TEMP/empty"
+          run "round trip through the packaged server" 0 'PASS plant=false mode=roundtrip fdbserver [0-9]+ on port' ""
+          run "second start reads the row the first wrote" 0 'PASS plant=false mode=read' "" --fdb-selftest-read
+          run "planted wrong value" 1 'FAIL plant=true mode=roundtrip read back' "" --fdb-selftest-plant
+          rm -rf "$RUNNER_TEMP/fdb state"
+          run "control: a fresh state has no row" 1 'FAIL plant=false mode=read no row from an earlier run' "" --fdb-selftest-read
+          echo "== no server left running"
+          if pgrep -l fdbserver; then fails=$((fails+1)); else echo "   none"; fi
+          echo "failed cases: $fails"; exit $fails
+
+  publish-macos:
+    needs: [build, sign-macos, verify-macos]
+    if: ${{ inputs.publish != false }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    env:
+      TAG: ${{ needs.build.outputs.tag }}
+    steps:
+      - uses: oras-project/setup-oras@v1
+      - name: Pull the packages by digest
+        shell: bash
+        env:
+          DIGEST: ${{ needs.sign-macos.outputs.digest }}
+        run: |
+          set -eu
+          echo "$GH_TOKEN" |
+            oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          oras pull "ghcr.io/v-sekai-fire/model-explorer@$DIGEST" -o dist
+          cd dist
+          sha256sum -c --quiet SHA256SUMS
+      - name: Create the macOS release and move the stage pointer
+        run: |
+          set -eu
+          full="$TAG-macos"
+          ! gh release view "$full" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || { echo "release $full exists"; exit 1; }
+          flags=""
+          [ "$STAGE" = release ] || flags="--prerelease"
+          gh release create "$full" dist/* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" $flags \
+            --title "Model Explorer $full ($STAGE) -- macOS" --generate-notes \
+            --notes "Model Explorer for macOS (Apple silicon), built from one pck: drop in a model and the auto-rig (R) rigs it. Signed with a Developer ID and notarized. Ships with the MCP server off and its slider hidden; reach it with \`-- --mcp-port=8789\` from the command line. Verify with SHA256SUMS."
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$STAGE-macos" -f sha="$GITHUB_SHA" -F force=true >/dev/null 2>&1 \
+            || gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$STAGE-macos" -f sha="$GITHUB_SHA" >/dev/null
+          echo "Stage pointer $STAGE-macos -> $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+  # --- windows ---
+  verify-windows:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      packages: read
+    env:
+      APP: skintokens-viewer
+      TAG: ${{ needs.build.outputs.tag }}
+    steps:
+      - uses: oras-project/setup-oras@v1
+      - name: Pull the packages by digest
+        shell: bash
+        env:
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          set -eu
+          echo "$GH_TOKEN" |
+            oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          oras pull "ghcr.io/v-sekai-fire/model-explorer@$DIGEST" -o dist
+          cd dist
+          sha256sum -c --quiet SHA256SUMS
+      - name: The packaged server starts, answers SQLite, and stops with the app
+        shell: bash
+        run: |
+          set +e
+          mkdir -p "$RUNNER_TEMP/pkg with space" && cd "$RUNNER_TEMP/pkg with space"
+          7z x -y "$GITHUB_WORKSPACE/dist/$APP-$TAG-windows-x86_64.zip" > /dev/null
+          exe=./$APP.exe
+          ls -la
+          fails=0
+          run() {
+            label=$1; want_rc=$2; want=$3; bin=$4; shift 4
+            if [ -n "$bin" ]; then export WEFT_FDB_BIN_DIR="$bin"; else unset WEFT_FDB_BIN_DIR; fi
+            export WEFT_FDB_STATE_DIR="$RUNNER_TEMP/fdb state"
+            rm -f "$WEFT_FDB_STATE_DIR/selftest-result.txt"
+            out=$(perl -e 'alarm 240; exec @ARGV' "$exe" --headless -- --fdb-selftest "$@" 2>&1); rc=$?
+            line=$(head -1 "$WEFT_FDB_STATE_DIR/selftest-result.txt" 2>/dev/null)
+            echo "== $label: rc=$rc  $line"
+            if [ "$rc" = "$want_rc" ] && echo "$line" | grep -Eq "$want"; then echo "   ok"; else echo "   WRONG, wanted rc=$want_rc and /$want/"; echo "$out" | tail -15; fails=$((fails+1)); fi
+          }
+          mkdir "$RUNNER_TEMP/empty"
+          run "control: no fdbserver" 1 'FAIL plant=false mode=roundtrip fdbserver and fdbcli not found' "$RUNNER_TEMP/empty"
+          run "round trip through the packaged server" 0 'PASS plant=false mode=roundtrip fdbserver [0-9]+ on port' ""
+          run "second start reads the row the first wrote" 0 'PASS plant=false mode=read' "" --fdb-selftest-read
+          run "planted wrong value" 1 'FAIL plant=true mode=roundtrip read back' "" --fdb-selftest-plant
+          rm -rf "$RUNNER_TEMP/fdb state"
+          run "control: a fresh state has no row" 1 'FAIL plant=false mode=read no row from an earlier run' "" --fdb-selftest-read
+          echo "== no server left running"
+          if tasklist | grep -i fdbserver; then fails=$((fails+1)); else echo "   none"; fi
+          echo "failed cases: $fails"; exit $fails
+
+  publish-windows:
+    needs: [build, verify-windows]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish != false }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    env:
+      TAG: ${{ needs.build.outputs.tag }}
+    steps:
+      - uses: oras-project/setup-oras@v1
+      - name: Pull the packages by digest
+        shell: bash
+        env:
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          set -eu
+          echo "$GH_TOKEN" |
+            oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          oras pull "ghcr.io/v-sekai-fire/model-explorer@$DIGEST" -o dist
+          cd dist
+          sha256sum -c --quiet SHA256SUMS
+          # This platform's files only, as each release holds.
+          grep -- "-windows-" SHA256SUMS > sums && mv sums SHA256SUMS
+          find . -type f ! -name SHA256SUMS ! -name "*-windows-*" -delete
+          sha256sum -c --quiet SHA256SUMS
+      - name: Create the Windows release and move the stage pointer
+        run: |
+          set -eu
+          full="$TAG-windows"
+          ! gh release view "$full" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || { echo "release $full exists"; exit 1; }
+          flags=""
+          [ "$STAGE" = release ] || flags="--prerelease"
+          gh release create "$full" dist/* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" $flags \
+            --title "Model Explorer $full ($STAGE) -- Windows" --generate-notes \
+            --notes "Model Explorer for Windows (x86_64), built from one pck: drop in a model and the auto-rig (R) rigs it. Unsigned, so SmartScreen will warn. Ships with the MCP server off and its slider hidden; reach it with \`-- --mcp-port=8789\` from the command line. Verify with SHA256SUMS."
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$STAGE-windows" -f sha="$GITHUB_SHA" -F force=true >/dev/null 2>&1 \
+            || gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$STAGE-windows" -f sha="$GITHUB_SHA" >/dev/null
+          echo "Stage pointer $STAGE-windows -> $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
