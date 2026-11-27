@@ -13,11 +13,16 @@ const McpSwitch = preload("res://vsk_model_explorer/core/McpSwitch.gd")
 const BuildConsts = preload("res://addons/vsk_version/build_constants.gd")
 const gltf_vrm_extension_const = preload("res://addons/vrm/vrm_extension.gd")
 const ControlsCard = preload("res://vsk_model_explorer/core/ControlsCard.gd")
-const AutoRig = preload("res://vsk_model_explorer/core/AutoRig.gd")
+# Loaded when they are needed, not at start: the model is drawn without them (docs/startup.md).
+const AUTO_RIG := "res://vsk_model_explorer/core/AutoRig.gd"
+const USD_IMPORT := "res://vsk_model_explorer/core/UsdImport.gd"
 const Bintr = preload("res://vsk_model_explorer/core/Bintr.gd")
-const UsdImport = preload("res://vsk_model_explorer/core/UsdImport.gd")
 const USD_EXTENSIONS := ["usd", "usda", "usdc", "usdz"]
 var auto_rig: Node
+var _rig_source := ""
+var _rig_output_base := ""
+var _rig_row: Array = []
+var _loading := false
 const Motion = preload("res://vsk_model_explorer/core/Motion.gd")
 const ColorChart = preload("res://vsk_model_explorer/core/ColorChart.gd")
 var color_chart: Node3D
@@ -58,25 +63,32 @@ func _ready():
 	fbx_is_loaded.connect(_place_color_chart.unbind(2))
 	if OS.has_feature("web"):
 		# The page rigs the model; here R saves a rigged .glb or a .vrm as a VRM 1.0 file.
-		auto_rig = AutoRig.new()
-		add_child(auto_rig)
-		auto_rig.rigged.connect(_load_file)
-		add_control_row(["keys", ["R"], "R", "Save as .vrm"])
+		_rig_row = ["keys", ["R"], "R", "Save as .vrm"]
+		_setup_auto_rig()
 	else:
 		# One pck, two desktop viewers: each feature is on when its weights are in the w folder.
 		# SkinTokens ships the rig weights; Kimodo motion ships the Kimodo weights.
-		auto_rig = AutoRig.new()
-		add_child(auto_rig)
-		auto_rig.rigged.connect(_load_file)
-		var rig_on: bool = auto_rig.available()
-		if rig_on:
-			add_control_row(["keys", ["R"], "R", "Auto-rig a .glb"])
+		_rig_row = ["keys", ["R"], "R", "Auto-rig a .glb"]
 		motion = Motion.new()
 		var motion_on: bool = motion.available()
 		var args := OS.get_cmdline_user_args()
 		var motion_test := false
+		var test_run := false
 		for a in args:
 			motion_test = motion_test or a.begins_with("--motion-quit=")
+			test_run = (
+				test_run
+				or (
+					a.begins_with("--")
+					and a != "--load-time-quit"
+					and not a.begins_with("--mcp-port=")
+				)
+			)
+		if motion_on or motion_test or test_run:
+			# The motion feature shows its status through the auto-rig, and a test reads it at once.
+			_setup_auto_rig()
+		else:
+			_setup_auto_rig_later()
 		if motion_on or motion_test:
 			add_child(motion)
 			motion.status = auto_rig.show_status
@@ -85,7 +97,7 @@ func _ready():
 			motion.free()
 			motion = null
 		if "--features-quit" in args:
-			print("VIEWER-FEATURES rig=%s motion=%s" % [rig_on, motion_on])
+			print("VIEWER-FEATURES rig=%s motion=%s" % [auto_rig.available(), motion_on])
 			get_tree().quit(0)
 	if ClassDB.get_class_list().find("FBXDocument") != -1:
 		fbx_doc = ClassDB.instantiate("FBXDocument")
@@ -133,6 +145,43 @@ func _check_command_line_args():
 			if ext in ["glb", "gltf", "vrm", "fbx"] or ext in USD_EXTENSIONS:
 				_load_file(file_path)
 				break
+
+
+# The auto-rig: its script takes about 200 ms to load, so a plain start makes it after the first frames.
+func _setup_auto_rig() -> void:
+	if auto_rig != null:
+		return
+	auto_rig = load(AUTO_RIG).new()
+	add_child(auto_rig)
+	auto_rig.rigged.connect(_load_file)
+	auto_rig.source = _rig_source
+	auto_rig.output_base = _rig_output_base
+	if OS.has_feature("web") or auto_rig.available():
+		add_control_row(_rig_row)
+
+
+func _setup_auto_rig_later() -> void:
+	# The opened model, or the empty stage, is on the screen first.
+	for i in 3:
+		await RenderingServer.frame_post_draw
+	while _loading:
+		await get_tree().process_frame
+	for i in 3:
+		await RenderingServer.frame_post_draw
+	_setup_auto_rig()
+
+
+func _rig_set(source: String, output_base: String) -> void:
+	_rig_source = source
+	_rig_output_base = output_base
+	if auto_rig:
+		auto_rig.source = source
+		auto_rig.output_base = output_base
+
+
+func _rig_status(text: String) -> void:
+	_setup_auto_rig()
+	auto_rig.show_status(text)
 
 
 func _report_load_time() -> void:
@@ -183,14 +232,12 @@ func _load_file(file_path: String):
 		keep = keep.path_join(normalized_path.get_file())
 		if DirAccess.copy_absolute(normalized_path, keep) == OK:
 			normalized_path = keep
-	if auto_rig:
-		auto_rig.source = normalized_path
-		auto_rig.output_base = ""
+	_rig_set(normalized_path, "")
 
 	if ext in USD_EXTENSIONS and OS.has_feature("web"):
 		# Web: this script is a guest, and a guest cannot enter a second guest (usd.elf). The
 		# plain-GDScript UsdImport converts on the next frame, outside this call, then opens the GLB.
-		var usd := UsdImport.new()
+		var usd: Node = load(USD_IMPORT).new()
 		add_child(usd)
 		usd.converted.connect(_on_usd_converted)
 		var dir := OS.get_user_data_dir().path_join("usd")
@@ -206,9 +253,7 @@ func _load_file(file_path: String):
 		if glb == "":
 			gltf_is_loaded.emit(false, null)
 			return
-		if auto_rig:
-			auto_rig.source = glb
-			auto_rig.output_base = normalized_path.get_basename()
+		_rig_set(glb, normalized_path.get_basename())
 		normalized_path = glb
 		ext = "glb"
 
@@ -216,6 +261,7 @@ func _load_file(file_path: String):
 		motion.source = normalized_path
 
 	if ext == "glb" or ext == "gltf" or ext == "vrm":
+		_loading = true
 		gltf_start_to_load.emit()
 
 		# unload previous loaded scene
@@ -277,14 +323,12 @@ func _load_file(file_path: String):
 func _on_usd_converted(source: String, glb: String, why: String) -> void:
 	if why != "":
 		printerr("USD-FAIL ", why)
-		if auto_rig:
-			auto_rig.show_status(why)
+		_rig_status(why)
 		gltf_is_loaded.emit(false, null)
 		return
 	print("USD-OK %s -> %s" % [source, glb])
 	_load_file(glb)
-	if auto_rig:
-		auto_rig.output_base = source.get_basename()
+	_rig_set(_rig_source, source.get_basename())
 
 
 func _usd_to_glb(path: String) -> String:
@@ -292,14 +336,13 @@ func _usd_to_glb(path: String) -> String:
 	DirAccess.make_dir_recursive_absolute(dir)
 	var out := dir.path_join(path.get_file().get_basename() + ".glb")
 	var t0 := Time.get_ticks_msec()
-	var usd := UsdImport.new()
+	var usd: Node = load(USD_IMPORT).new()
 	add_child(usd)
-	var why := usd.to_glb(path, out)
+	var why: String = usd.to_glb(path, out)
 	usd.queue_free()
 	if why != "":
 		printerr("USD-FAIL ", why)
-		if auto_rig:
-			auto_rig.show_status(why)
+		_rig_status(why)
 		return ""
 	print("USD-OK %s -> %s ms=%d" % [path, out, Time.get_ticks_msec() - t0])
 	return out
@@ -374,10 +417,12 @@ func _load_gltf(file: String):
 
 
 func _emit_gltf_load(gltf) -> void:
+	_loading = false
 	gltf_is_loaded.emit(true, gltf)
 
 
 func _emit_gltf_load_failed() -> void:
+	_loading = false
 	gltf_is_loaded.emit(false, null)
 
 
