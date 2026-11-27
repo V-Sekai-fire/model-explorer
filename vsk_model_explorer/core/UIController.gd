@@ -47,7 +47,9 @@ const ViewerSettings = preload("res://vsk_model_explorer/core/ViewerSettings.gd"
 var card_theme: Theme = CardStyle.make_theme()
 
 var maxAabb: AABB
-var exploder = preload("res://addons/model_explode/explode.gd").new()
+# addons/model_explode, made at the first explode: its script is not needed to draw a model (docs/startup.md).
+const EXPLODE := "res://addons/model_explode/explode.gd"
+var exploder = null
 
 # Touch tap tracking. A single-finger tap is a press with no meaningful drag (the
 # camera's 1-finger orbit and 2-finger pinch/pan are the only other touch gestures,
@@ -158,7 +160,7 @@ func _on_root_gltf_is_loaded(success, gltf: Node):
 	Input.action_press("close_popup")
 	_xray_restore()  # the old model is going; the new one opens solid
 	xray_on = false
-	if exploder.is_exploded():
+	if exploder != null and exploder.is_exploded():
 		exploder.implode()
 		exploded = false
 	if not success:
@@ -721,12 +723,14 @@ func _set_exploded(on: bool, animate := true) -> void:
 	nodes.append_array(get_tree().get_nodes_in_group(GlobalSignal.FBX_GROUP))
 	nodes.append_array(get_tree().get_nodes_in_group(GlobalSignal.GLTF_GROUP))
 	if on:
+		if exploder == null:
+			exploder = load(EXPLODE).new()
 		exploder.explode(nodes, get_tree().current_scene, animate)
 		exploder.print_layout()
 		if exploder.root != null:
 			for piece in exploder.root.find_children("*", "MeshInstance3D", true, false):
 				_make_clickable(piece)
-	else:
+	elif exploder != null:
 		exploder.implode()
 	# The model's own meshes are hidden while its pieces show: only what is seen takes a click.
 	for model in nodes:
